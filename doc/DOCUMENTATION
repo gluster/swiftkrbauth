@@ -1,0 +1,299 @@
+Kerberos Authentication Filter for Red Hat Storage and OpenStack Swift
+----------------------------------------------------------------------
+
+Red Hat Storage not only provides file system access to its data, but
+also object-level access. The latter is implemented with OpenStack
+Swift, and allows containers and objects to be stored and retrieved
+with an HTTP-based API.
+
+Red Hat Storage 2.0 comes with a simple authentication filter that
+defines user accounts as a static list in the Swift configuration
+file. For this project, we implemented a new authentication filter
+that uses Kerberos tickets for single sign on authentication, and
+grants administrator permissions based on the user's group membership
+in a directory service like Red Hat Enterprise Linux Identity
+Management or Microsoft Active Directory.
+
+* Building
+
+To build the swiftkerbauth and apachekerbauth RPM packages, change
+into the respective directory and run
+
+  ./build.sh
+
+* Installation
+
+** Swift Server
+
+Install the swiftkerbauth RPM on all Red Hat Storage nodes that will
+provide object-level access via Swift.
+
+To active the Kerberos authentication filter, add "kerbauth" in the
+/etc/swift/proxy-server.conf pipeline parameter:
+
+  [pipeline:main]
+  pipeline = healthcheck cache kerbauth proxy-server
+
+Set the URL of the Apache server that will be used for authentication
+with the ext_authentication_url parameter in the same file:
+
+  [filter:kerbauth]
+  paste.filter_factory = swiftkerbauth:filter_factory
+  ext_authentication_url = http://AUTHENTICATION_SERVER/cgi-bin/swift-auth
+
+If the Swift server is not one of your Gluster nodes, edit
+/etc/swift/fs.conf and change the following lines in the DEFAULT
+section:
+
+  mount_ip = RHS_NODE_HOSTNAME
+  remote_cluster = yes
+
+Activate the changes by running
+
+  swift-init main restart
+
+For troubleshooting, check /var/log/messages.
+
+** Authentication Server
+
+On the authentication server, install the apachekerbauth package.
+
+Edit /etc/httpd/conf.d/swift-auth.conf and set the KrbAuthRealms and
+Krb5KeyTab parameters.
+
+The keytab must contain a HTTP/$HOSTNAME principal. Usually, you will
+have to create the Kerberos principal on the KDC, export it, and copy
+it to a keytab file on the Apache server.
+
+If SELinux is enabled, allow Apache to connect to memcache and
+activate the changes by running
+
+  setsebool -P httpd_can_network_connect 1
+  setsebool -P httpd_can_network_memcache 1
+
+  service httpd reload
+
+For troubleshooting, see /var/log/httpd/error_log.
+
+* Testing
+
+The tests were done with curl on a machine set up as an IDM client,
+using the Gluster volume rhs_ufo1.
+
+In IDM, we created the following user groups:
+
+- auth_reseller_admin
+  Users in this group get full access to all Swift accounts.
+
+- auth_rhs_ufo1
+  Users in this group get full access to the rhs_ufo1 Swift account.
+
+Next, we created the following users in IDM:
+
+- auth_admin
+  Member of the auth_reseller_admin group
+
+- rhs_ufo1_admin
+  Member of the auth_rhs_ufo1 group
+
+- jsmith
+  No relevant group membership
+
+The authentication tokens were then retrieved with the following
+commands:
+
+  kinit auth_admin
+  curl -v -u : --negotiate --location-trusted \
+    http://rhs1.example.com:8080/auth/v1.0
+
+  kinit rhs_ufo1_admin
+  curl -v -u : --negotiate --location-trusted \
+    http://rhs1.example.com:8080/auth/v1.0
+
+  kinit jsmith
+  curl -v -u : --negotiate --location-trusted \
+    http://rhs1.example.com:8080/auth/v1.0
+
+Each of these commands should output the following two lines:
+
+< X-Auth-Token: AUTH_tk4097146ed3814e026209556eeb121fe0
+...
+<pre>1365195860 / auth_admin,auth_reseller_admin</pre>
+
+The first line contains the authentication token that is used in
+subsequent requests.
+
+The second line is printed by the swift-auth CGI script for debugging
+- it lists the token expiration (in seconds since January 1, 1970) and
+the user's groups.
+
+Next, we try to get information about the Swift account, replacing the
+AUTH_tk* with one of the tokens we got with the commands above. This
+should display statistics, and the list of container names when used
+with the the admin users. For jsmith, you should get a 403 Forbidden
+error.
+
+  curl -v -X GET \
+    -H 'X-Auth-Token: AUTH_tk4097146ed3814e026209556eeb121fe0' \
+    http://rhs1.example.com:8080/v1/AUTH_rhs_ufo1
+
+With one of the admin accounts, create a new container and a new
+object in that container:
+
+  curl -v -X PUT \
+    -H 'X-Auth-Token: AUTH_tk4097146ed3814e026209556eeb121fe0' \
+    http://rhs1.example.com:8080/v1/AUTH_rhs_ufo1/pictures
+
+  curl -v -X PUT \
+    -H 'X-Auth-Token: AUTH_tk4097146ed3814e026209556eeb121fe0' \
+    -H 'Content-Length: 0' \
+    http://rhs1.example.com:8080/v1/AUTH_rhs_ufo1/pictures/pic1.png
+
+Grant permission for jsmith to list and download objects from the
+pictures container:
+
+  curl -v -X POST \
+    -H 'X-Auth-Token: AUTH_tkdbf7725c1e4ad1ebe9ab0d7098d425f2' \
+    -H 'X-Container-Read: jsmith' \
+    http://rhs1.example.com:8080/v1/AUTH_rhs_ufo1/pictures
+
+List the container contents using the authentication token for jsmith:
+
+  curl -v -X GET \
+    -H 'X-Auth-Token: AUTH_tkef8b417ac0c2a73a80ab3b8db85254e2' \
+    http://rhs1.example.com:8080/v1/AUTH_rhs_ufo1/pictures
+
+Try to access a resource without an authentication token. This will
+return a 303 redirect:
+
+  curl -v -X GET \
+    http://rhs1.example.com:8080/v1/AUTH_rhs_ufo1/pictures/pic1.png
+
+For curl to follow the redirect, you need to specify additional
+options. With these, and with a current Kerberos ticket, you should
+get the Kerberos user's cached authentication token, or a new one if
+the previous token has expired.
+
+  curl -v -u : --negotiate --location-trusted -X GET \
+    http://rhs1.example.com:8080/v1/AUTH_rhs_ufo1/pictures/pic1.png
+
+* Implementation Details
+
+** Architecture
+
+The Swift API is HTTP-based. As described in the Swift documentation
+[1], clients first make a request to an authentication URL, providing
+a username and password. The reply contains a token which is used in
+all subsequent requests.
+
+Swift has a chain of filters through which all client requests go. The
+filters to use are configured with the pipeline parameter in
+/etc/swift/proxy-server.conf:
+
+  [pipeline:main]
+  pipeline = healthcheck cache tempauth proxy-server
+
+For the single sign authentication, we added a new filter called
+"kerbauth" and put it into the filter pipeline in place of tempauth.
+
+The filter checks the URL for each client request. If it matches the
+authentication URL, the client is redirected to a URL on a different
+server. The URL is handled by a CGI script, which is set up to
+authenticate the client with Kerberos negotiation, retrieve the user's
+system groups [2], store them in a memcache ring shared with the Swift
+server, and return the authentication token to the client.
+
+When the client provides the token as part of a resource request, the
+kerbauth filter checks it against its memcache, grants administrator
+rights based on the group membership retrieved from memcache, and
+either grants or denies the resource access.
+
+[1] http://docs.openstack.org/api/openstack-object-storage/1.0/content/authentication-object-dev-guide.html
+
+[2] The user data and system groups are usually provided by Red Hat
+    Enterprise Linux identity Management or Microsoft Active
+    Directory. The script relies on the system configuration to be set
+    accordingly (/etc/nsswitch.conf).
+
+** swiftkerbauth.py
+
+The script /usr/lib/python2.6/site-packages/swiftkerbauth.py began as
+a copy of the tempauth.py script from
+/usr/lib/python2.6/site-packages/swift/common/middleware. It contains
+the following modifications, among others:
+
+In the __init__ method, we read the ext_authentication_url parameter
+from /etc/swift/proxy-server.conf. This is the URL that clients are
+redirected to when they access either the Swift authentication URL, or
+when they request a resource without a valid authentication token.
+
+The configuration in proxy-server.conf looks like this:
+
+  [filter:kerbauth]
+  paste.filter_factory = swiftkerbauth:filter_factory
+  ext_authentication_url = http://rhel6-4.localdomain/cgi-bin/swift-auth
+
+The authorize method was changed so that global administrator rights
+are granted if the user is a member of the auth_reseller_admin
+group. Administrator rights for a specific account like vol1 are
+granted if the user is a member of the auth_vol1 group. [3]
+
+The denied_response method was changed to return a HTTP redirect to
+the external authentication URL if no valid token was provided by the
+client.
+
+Most of the handle_get_token method was moved to the external
+authentication script. This method now returns a HTTP redirect.
+
+In the __call__ and get_groups method, we removed support for the
+HTTP_AUTHORIZATION header, which is only needed when Amazon S3 is
+used.
+
+Like tempauth.py, swiftkerbauth.py uses a Swift wrapper to access
+memcache. This wrapper converts the key to an MD5 hash and uses the
+hash value to determine on which of a pre-defined list of servers to
+store the data.
+
+[3] "auth" is the default reseller prefix, and would be different if
+    the reseller_prefix parameter in proxy-server.conf was set.
+
+** swift-auth CGI Script
+
+swift-auth resides on an Apache server and assumes that Apache is
+configured to authenticate the user before this script is
+executed. The script retrieves the username from the REMOTE_USER
+environment variable, and checks if there already is a token for this
+user in the memcache ring. If not, it generates a new one, retrieves
+the user's system groups with "id -Gn USERNAME", stores this
+information in the memcache ring, and returns the token to the client.
+
+For the Swift filter to be able to find the information, it was
+important to use the Swift memcached module. Because we don't want to
+require a full Swift installation on the authentication server,
+/usr/lib/python2.6/site-packages/swift/common/memcached.py from the
+Swift server was copied to /var/www/cgi-bin on the Apache server.
+
+To allow the CGI script to connect to memcache, the SELinux booleans
+httpd_can_network_connect and httpd_can_network_memcache had to be
+set.
+
+The tempauth filter uses the uuid module to generate token
+strings. This module creates and runs temporary files, which leads to
+AVC denial messages in /var/log/audit/audit.log when used from an
+Apache CGI script. While the module still works, the audit log would
+grow quickly. Instead of writing an SELinux policy module to allow or
+to silently ignore these accesses, the swift-auth script uses the
+"random" module for generating token strings.
+
+Red Hat Enterprise Linux 6 comes with Python 2.6 which only provides
+method to list the locally defined user groups. To include groups from
+Red Hat Enterprise Linux Identity Management and in the future from
+Active Directory, the "id" command is run in a subprocess.
+
+* Reference Material
+
+Red Hat Storage Administration Guide:
+https://access.redhat.com/knowledge/docs/Red_Hat_Storage/
+
+Swift Documentation:
+http://docs.openstack.org/developer/swift/

@@ -12,22 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from time import gmtime, strftime, time
+from time import time
 from traceback import format_exc
-from urllib import quote, unquote
-
 from eventlet import Timeout
 
-from pkg_resources import require
-require("WebOb>=1.0.8")
-
-from webob import Response, Request
-from webob.exc import HTTPBadRequest, HTTPForbidden, HTTPNotFound, \
+from swift.common.swob import Request
+from swift.common.swob import HTTPBadRequest, HTTPForbidden, HTTPNotFound, \
     HTTPSeeOther
 
 from swift.common.middleware.acl import clean_acl, parse_acl, referrer_allowed
-from swift.common.utils import cache_from_env, get_logger, get_remote_client, \
-    split_path, TRUE_VALUES
+from swift.common.utils import cache_from_env, get_logger,  \
+    split_path, config_true_value
+
 
 class KerbAuth(object):
     """
@@ -58,26 +54,30 @@ class KerbAuth(object):
         self.app = app
         self.conf = conf
         self.logger = get_logger(conf, log_route='kerbauth')
-        self.log_headers = conf.get('log_headers') == 'True'
+        self.log_headers = config_true_value(conf.get('log_headers', 'f'))
         self.reseller_prefix = conf.get('reseller_prefix', 'AUTH').strip()
         if self.reseller_prefix and self.reseller_prefix[-1] != '_':
             self.reseller_prefix += '_'
+        self.logger.set_statsd_prefix('kerbauth.%s' % (
+            self.reseller_prefix if self.reseller_prefix else 'NONE',))
         self.auth_prefix = conf.get('auth_prefix', '/auth/')
-        if not self.auth_prefix:
+        if not self.auth_prefix or not self.auth_prefix.strip('/'):
+            self.logger.warning('Rewriting invalid auth prefix "%s" to '
+                                '"/auth/" (Non-empty auth prefix path '
+                                'is required)' % self.auth_prefix)
             self.auth_prefix = '/auth/'
         if self.auth_prefix[0] != '/':
             self.auth_prefix = '/' + self.auth_prefix
         if self.auth_prefix[-1] != '/':
             self.auth_prefix += '/'
         self.token_life = int(conf.get('token_life', 86400))
-        self.allowed_sync_hosts = [h.strip()
-            for h in conf.get('allowed_sync_hosts', '127.0.0.1').split(',')
-            if h.strip()]
-        self.allow_overrides = \
-            conf.get('allow_overrides', 't').lower() in TRUE_VALUES
+        self.allow_overrides = config_true_value(
+            conf.get('allow_overrides', 't'))
+        self.storage_url_scheme = conf.get('storage_url_scheme', 'default')
         self.ext_authentication_url = conf.get('ext_authentication_url')
         if not self.ext_authentication_url:
-            raise RuntimeError("Missing filter parameter ext_authentication_url in /etc/swift/proxy-server.conf")
+            raise RuntimeError("Missing filter parameter ext_authentication_"
+                               "url in /etc/swift/proxy-server.conf")
 
     def __call__(self, env, start_response):
         """
@@ -98,16 +98,19 @@ class KerbAuth(object):
         if token and token.startswith(self.reseller_prefix):
             groups = self.get_groups(env, token)
             if groups:
-                env['REMOTE_USER'] = groups
                 user = groups and groups.split(',', 1)[0] or ''
-                # We know the proxy logs the token, so we augment it just a bit
-                # to also log the authenticated user.
-                env['HTTP_X_AUTH_TOKEN'] = '%s,%s' % (user, token)
+                trans_id = env.get('swift.trans_id')
+                self.logger.debug('User: %s uses token %s (trans_id %s)' %
+                                  (user, token, trans_id))
+                env['REMOTE_USER'] = groups
                 env['swift.authorize'] = self.authorize
                 env['swift.clean_acl'] = clean_acl
+                if '.reseller_admin' in groups:
+                    env['reseller_request'] = True
             else:
                 # Invalid token (may be expired)
-                return HTTPSeeOther(location=self.ext_authentication_url)(env, start_response)
+                return HTTPSeeOther(
+                    location=self.ext_authentication_url)(env, start_response)
         else:
             # With a non-empty reseller_prefix, I would like to be called
             # back for anonymous access to accounts I know I'm the
@@ -116,7 +119,8 @@ class KerbAuth(object):
                 version, rest = split_path(env.get('PATH_INFO', ''),
                                            1, 2, True)
             except ValueError:
-                return HTTPNotFound()(env, start_response)
+                version, rest = None, None
+                self.logger.increment('errors')
             # Not my token, not my account, I can't authorize this request,
             # deny all is a good idea if not already set...
             if 'swift.authorize' not in env:
@@ -158,12 +162,19 @@ class KerbAuth(object):
         Enterprise Linux Identity Management is used.
         """
         try:
-            version, account, container, obj = split_path(req.path, 1, 4, True)
+            version, account, container, obj = req.split_path(1, 4, True)
         except ValueError:
+            self.logger.increment('errors')
             return HTTPNotFound(request=req)
+
         if not account or not account.startswith(self.reseller_prefix):
+            self.logger.debug("Account name: %s doesn't start with "
+                              "reseller_prefix: %s."
+                              % (account, self.reseller_prefix))
             return self.denied_response(req)
+
         user_groups = (req.remote_user or '').split(',')
+        account_user = user_groups[1] if len(user_groups) > 1 else None
         # If the user is in the reseller_admin group for our prefix, he gets
         # full access to all accounts we manage. For the default reseller
         # prefix, the group name is auth_reseller_admin.
@@ -173,6 +184,7 @@ class KerbAuth(object):
                 account[len(self.reseller_prefix)] != '.':
             req.environ['swift_owner'] = True
             return None
+
         # The "account" is part of the request URL, and already contains the
         # reseller prefix, like in "/v1/AUTH_vol1/pictures/pic1.png".
         if account.lower() in user_groups and \
@@ -180,24 +192,37 @@ class KerbAuth(object):
             # If the user is admin for the account and is not trying to do an
             # account DELETE or PUT...
             req.environ['swift_owner'] = True
+            self.logger.debug("User %s has admin authorizing."
+                              % account_user)
             return None
-        if (req.environ.get('swift_sync_key') and
-            req.environ['swift_sync_key'] ==
-                req.headers.get('x-container-sync-key', None) and
-            'x-timestamp' in req.headers and
-            (req.remote_addr in self.allowed_sync_hosts or
-             get_remote_client(req) in self.allowed_sync_hosts)):
+
+        if (req.environ.get('swift_sync_key')
+                and (req.environ['swift_sync_key'] ==
+                     req.headers.get('x-container-sync-key', None))
+                and 'x-timestamp' in req.headers):
+            self.logger.debug("Allow request with container sync-key: %s."
+                              % req.environ['swift_sync_key'])
             return None
+
+        if req.method == 'OPTIONS':
+            #allow OPTIONS requests to proceed as normal
+            self.logger.debug("Allow OPTIONS request.")
+            return None
+
         referrers, groups = parse_acl(getattr(req, 'acl', None))
+
         if referrer_allowed(req.referer, referrers):
             if obj or '.rlistings' in groups:
+                self.logger.debug("Allow authorizing %s via referer ACL."
+                                  % req.referer)
                 return None
-            return self.denied_response(req)
-        if not req.remote_user:
-            return self.denied_response(req)
+
         for user_group in user_groups:
             if user_group in groups:
+                self.logger.debug("User %s allowed in ACL: %s authorizing."
+                                  % (account_user, user_group))
                 return None
+
         return self.denied_response(req)
 
     def denied_response(self, req):
@@ -206,6 +231,7 @@ class KerbAuth(object):
         depending on whether the REMOTE_USER is set or not.
         """
         if req.remote_user:
+            self.logger.increment('forbidden')
             return HTTPForbidden(request=req)
         else:
             return HTTPSeeOther(location=self.ext_authentication_url)
@@ -214,7 +240,7 @@ class KerbAuth(object):
         """
         WSGI entry point for auth requests (ones that match the
         self.auth_prefix).
-        Wraps env in webob.Request object and passes it down.
+        Wraps env in swob.Request object and passes it down.
 
         :param env: WSGI environment dictionary
         :param start_response: WSGI callable
@@ -228,20 +254,10 @@ class KerbAuth(object):
             if 'x-storage-token' in req.headers and \
                     'x-auth-token' not in req.headers:
                 req.headers['x-auth-token'] = req.headers['x-storage-token']
-            if 'eventlet.posthooks' in env:
-                env['eventlet.posthooks'].append(
-                    (self.posthooklogger, (req,), {}))
-                return self.handle_request(req)(env, start_response)
-            else:
-                # Lack of posthook support means that we have to log on the
-                # start of the response, rather than after all the data has
-                # been sent. This prevents logging client disconnects
-                # differently than full transmissions.
-                response = self.handle_request(req)(env, start_response)
-                self.posthooklogger(env, req)
-                return response
+            return self.handle_request(req)(env, start_response)
         except (Exception, Timeout):
             print "EXCEPTION IN handle: %s: %s" % (format_exc(), env)
+            self.logger.increment('errors')
             start_response('500 Server Error',
                            [('Content-Type', 'text/plain')])
             return ['Internal server error.\n']
@@ -251,19 +267,20 @@ class KerbAuth(object):
         Entry point for auth requests (ones that match the self.auth_prefix).
         Should return a WSGI-style callable (such as webob.Response).
 
-        :param req: webob.Request object
+        :param req: swob.Request object
         """
         req.start_time = time()
         handler = None
         try:
-            version, account, user, _junk = split_path(req.path_info,
-                minsegs=1, maxsegs=4, rest_with_last=True)
+            version, account, user, _junk = req.split_path(1, 4, True)
         except ValueError:
+            self.logger.increment('errors')
             return HTTPNotFound(request=req)
         if version in ('v1', 'v1.0', 'auth'):
             if req.method == 'GET':
                 handler = self.handle_get_token
         if not handler:
+            self.logger.increment('errors')
             req.response = HTTPBadRequest(request=req)
         else:
             req.response = handler(req)
@@ -284,55 +301,21 @@ class KerbAuth(object):
         On successful authentication, the response will have X-Auth-Token
         set to the token to use with Swift.
 
-        :param req: The webob.Request to process.
-        :returns: webob.Response, 2xx on success with data set as explained
+        :param req: The swob.Request to process.
+        :returns: swob.Response, 2xx on success with data set as explained
                   above.
         """
         # Validate the request info
         try:
-            pathsegs = split_path(req.path_info, minsegs=1, maxsegs=3,
-                                  rest_with_last=True)
+            pathsegs = split_path(req.path_info, 1, 3, True)
         except ValueError:
+            self.logger.increment('errors')
             return HTTPNotFound(request=req)
-        if not ((pathsegs[0] == 'v1' and pathsegs[2] == 'auth') or pathsegs[0] in ('auth', 'v1.0')):
-            return HTTPBadRequest(request=req)
+        if not ((pathsegs[0] == 'v1' and pathsegs[2] == 'auth')
+                or pathsegs[0] in ('auth', 'v1.0')):
+                    return HTTPBadRequest(request=req)
 
         return HTTPSeeOther(location=self.ext_authentication_url)
-
-    def posthooklogger(self, env, req):
-        if not req.path.startswith(self.auth_prefix):
-            return
-        response = getattr(req, 'response', None)
-        if not response:
-            return
-        trans_time = '%.4f' % (time() - req.start_time)
-        the_request = quote(unquote(req.path))
-        if req.query_string:
-            the_request = the_request + '?' + req.query_string
-        # remote user for zeus
-        client = req.headers.get('x-cluster-client-ip')
-        if not client and 'x-forwarded-for' in req.headers:
-            # remote user for other lbs
-            client = req.headers['x-forwarded-for'].split(',')[0].strip()
-        logged_headers = None
-        if self.log_headers:
-            logged_headers = '\n'.join('%s: %s' % (k, v)
-                                       for k, v in req.headers.items())
-        status_int = response.status_int
-        if getattr(req, 'client_disconnect', False) or \
-                getattr(response, 'client_disconnect', False):
-            status_int = 499
-        self.logger.info(' '.join(quote(str(x)) for x in (client or '-',
-            req.remote_addr or '-', strftime('%d/%b/%Y/%H/%M/%S', gmtime()),
-            req.method, the_request, req.environ['SERVER_PROTOCOL'],
-            status_int, req.referer or '-', req.user_agent or '-',
-            req.headers.get('x-auth-token',
-                req.headers.get('x-auth-admin-user', '-')),
-            getattr(req, 'bytes_transferred', 0) or '-',
-            getattr(response, 'bytes_transferred', 0) or '-',
-            req.headers.get('etag', '-'),
-            req.environ.get('swift.trans_id', '-'), logged_headers or '-',
-            trans_time)))
 
 
 def filter_factory(global_conf, **local_conf):
