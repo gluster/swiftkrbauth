@@ -46,7 +46,7 @@ class KerbAuth(object):
     And add a kerbauth filter section, such as::
 
         [filter:kerbauth]
-        use = egg:swift#kerbauth
+        use = egg:swiftkerbauth#kerbauth
 
     See the proxy-server.conf-sample for more information.
 

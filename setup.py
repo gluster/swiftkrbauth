@@ -19,6 +19,9 @@ from setuptools import setup
 from swiftkerbauth import __version__
 import os
 
+with open('README.md') as file:
+    long_description = file.read()
+
 
 # Ugly hack to exclude data_files if running in tox as non root
 def include_data_files():
@@ -40,6 +43,7 @@ setup(
     license='Apache License (2.0)',
     author='Red Hat, Inc.',
     author_email='gluster-users@gluster.org',
+    long_description=long_description,
     url='https://forge.gluster.org/swiftkerbauth',
     packages=['swiftkerbauth'],
     keywords='openstack swift kerberos',
