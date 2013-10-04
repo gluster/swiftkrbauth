@@ -14,6 +14,8 @@ Table of Contents
 -----------------
 
 1. [Architecture](doc/architecture.md)
-2. [IPA Server Guide](doc/ipa_server.md)
-3. [IPA Client Guide](doc/ipa_client.md)
-4. [Swiftkerbauth Guide](doc/swiftkerbauth_guide.md)
+2. [RHEL IPA Server Guide](doc/ipa_server.md)
+3. [RHEL IPA Client Guide](doc/ipa_client.md)
+4. [Windows AD Server Guide](doc/AD_server.md)
+5. [Windows AD Client Guide](doc/AD_client.md)
+6. [Swiftkerbauth Guide](doc/swiftkerbauth_guide.md)

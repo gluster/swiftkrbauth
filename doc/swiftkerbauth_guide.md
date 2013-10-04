@@ -43,6 +43,14 @@ Retrieve the HTTP service principal to a keytab file:
 Copy keytab file to client:
 > scp /tmp/http.keytab root@192.168.56.101:/etc/httpd/conf/http.keytab
 
+## Creating HTTP Service Principal on Windows AD server
+
+Add a HTTP Kerberos service principal:
+> c:\>ktpass.exe -princ HTTP/fcclient.winad.com@WINAD.COM -mapuser
+> auth_admin@WINAD.COM -pass Redhat*123 -out c:\HTTP.keytab
+
+Use winscp to copy HTTP.ketab file to /etc/httpd/conf/http.keytab
+
 *****
 
 <a name="install-swiftkerbauth" />
