@@ -17,8 +17,12 @@ from traceback import format_exc
 from eventlet import Timeout
 
 from swift.common.swob import Request
-from swift.common.swob import HTTPBadRequest, HTTPForbidden, HTTPNotFound, \
-    HTTPSeeOther
+from swift.common.swob import HTTPBadRequest, HTTPForbidden, HTTPNotFound
+
+try:
+    from swift.common.swob import HTTPSeeOther
+except ImportError:
+    from swift.common.swob import HTTPFound as HTTPSeeOther
 
 from swift.common.middleware.acl import clean_acl, parse_acl, referrer_allowed
 from swift.common.utils import cache_from_env, get_logger,  \
