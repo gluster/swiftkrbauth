@@ -40,6 +40,7 @@ MEMCACHE_SERVERS = ['127.0.0.1:11211']
 
 DEBUG_HEADERS = True
 
+
 def main():
     remote_user = os.environ['REMOTE_USER']
     matches = re.match('([^@]+)@.*', remote_user)

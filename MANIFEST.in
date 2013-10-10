@@ -1,4 +1,4 @@
 include LICENSE README
-recursive-include swiftkerbauth *.py
+recursive-include swiftkerbauth test *.py
 graft doc
 graft apachekerbauth
