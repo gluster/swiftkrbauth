@@ -21,7 +21,7 @@ from swiftkerbauth import kerbauth as auth
 from swift.common.swob import Request, Response
 
 EXT_AUTHENTICATION_URL = "127.0.0.1"
-REDIRECT_STATUS = 302
+REDIRECT_STATUS = 303  # HTTPSeeOther
 
 
 def my_filter_factory(global_conf, **local_conf):
