@@ -18,95 +18,41 @@
 #   setsebool -P httpd_can_network_connect 1
 #   setsebool -P httpd_can_network_memcache 1
 
+import os
 import cgi
 from swift.common.memcached import MemcacheRing
-import os
-import grp
-import random
-import re
-import subprocess
 from time import time, ctime
-
-# After how many seconds the cached information about an authentication
-# token is discarded.
-TOKEN_LIFE = 86400
-
-# This is used as a prefix for tokens and memcache keys. We use the default
-# value from the Swift tempauth filter. In the future, this should be turned
-# into a configuration parameter.
-RESELLER_PREFIX = 'AUTH_'
-
-MEMCACHE_SERVERS = ['127.0.0.1:11211']
-
-DEBUG_HEADERS = True
+from swiftkerbauth import MEMCACHE_SERVERS, TOKEN_LIFE, DEBUG_HEADERS
+from swiftkerbauth.kerbauth_utils import get_remote_user, get_auth_data, \
+    generate_token, set_auth_data, get_groups
 
 
 def main():
-    remote_user = os.environ['REMOTE_USER']
-    matches = re.match('([^@]+)@.*', remote_user)
-    if not matches:
-        raise RuntimeError("Malformed REMOTE_USER \"%s\"" % remote_user)
+    try:
+        username = get_remote_user(os.environ)
+    except RuntimeError:
+        print "Status: 401 Unauthorized\n"
+        print "Malformed REMOTE_USER"
+        return
 
-    username = matches.group(1)
+    if not MEMCACHE_SERVERS:
+        print "Status: 500 Internal Server Error\n"
+        print "Memcache not configured in /etc/swift/proxy-server.conf"
+        return
 
-    mc = MemcacheRing(MEMCACHE_SERVERS)
+    mc_servers = [s.strip() for s in MEMCACHE_SERVERS.split(',') if s.strip()]
+    mc = MemcacheRing(mc_servers)
 
-    # Check if we already got a token for this user.
-    memcache_user_key = '%s/user/%s' % (RESELLER_PREFIX, username)
-    token = None
-    candidate_token = mc.get(memcache_user_key)
-    if candidate_token:
-        memcache_token_key = '%s/token/%s' % (RESELLER_PREFIX, candidate_token)
-        cached_auth_data = mc.get(memcache_token_key)
-        if cached_auth_data:
-            expires, groups = cached_auth_data
-            if expires > time():
-                token = candidate_token
+    token, expires, groups = get_auth_data(mc, username)
 
     if not token:
-        # We don't use uuid.uuid4() here because importing the uuid module
-        # causes (harmless) SELinux denials in the audit log on RHEL 6. If this
-        # is a security concern, a custom SELinux policy module could be
-        # written to not log those denials.
-        r = random.SystemRandom()
-        token = '%stk%s' % \
-                (RESELLER_PREFIX,
-                 ''.join(r.choice('abcdef0123456789') for x in range(32)))
-
-        # Retrieve the numerical group IDs. We cannot list the group names
-        # because group names from Active Directory may contain spaces, and
-        # we wouldn't be able to split the list of group names into its
-        # elements.
-        p = subprocess.Popen(['id', '-G', username], stdout=subprocess.PIPE)
-        if p.wait() != 0:
-            raise RuntimeError("Failure running id -G for %s" % remote_user)
-
-        (p_stdout, p_stderr) = p.communicate()
-
-        # Convert the group numbers into group names.
-        groups = []
-        for gid in p_stdout.strip().split(" "):
-            groups.append(grp.getgrgid(int(gid))[0])
-
-        # The first element of the list is considered a unique identifier
-        # for the user. We add the username to accomplish this.
-        if username in groups:
-            groups.remove(username)
-        groups = [username] + groups
-
-        groups = ','.join(groups)
-
+        token = generate_token()
         expires = time() + TOKEN_LIFE
-        auth_data = (expires, groups)
-
-        memcache_token_key = "%s/token/%s" % (RESELLER_PREFIX, token)
-        mc.set(memcache_token_key, auth_data, timeout=TOKEN_LIFE)
-
-        # Record the token with the user info for future use.
-        memcache_user_key = '%s/user/%s' % (RESELLER_PREFIX, username)
-        mc.set(memcache_user_key, token, timeout=TOKEN_LIFE)
+        groups = get_groups(username)
+        set_auth_data(mc, username, token, expires, groups)
 
     print "X-Auth-Token: %s" % token
+    print "X-Storage-Token: %s" % token
 
     # For debugging.
     if DEBUG_HEADERS:

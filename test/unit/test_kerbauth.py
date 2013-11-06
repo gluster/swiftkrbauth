@@ -14,10 +14,10 @@
 # limitations under the License.
 
 import unittest
-from contextlib import contextmanager
 from time import time
 
 from swiftkerbauth import kerbauth as auth
+from test.unit import FakeMemcache
 from swift.common.swob import Request, Response
 
 EXT_AUTHENTICATION_URL = "127.0.0.1"
@@ -44,34 +44,6 @@ def patch_filter_factory():
 
 def unpatch_filter_factory():
     reload(auth)
-
-
-class FakeMemcache(object):
-
-    def __init__(self):
-        self.store = {}
-
-    def get(self, key):
-        return self.store.get(key)
-
-    def set(self, key, value, time=0):
-        self.store[key] = value
-        return True
-
-    def incr(self, key, time=0):
-        self.store[key] = self.store.setdefault(key, 0) + 1
-        return self.store[key]
-
-    @contextmanager
-    def soft_lock(self, key, timeout=0, retries=5):
-        yield True
-
-    def delete(self, key):
-        try:
-            del self.store[key]
-        except Exception:
-            pass
-        return True
 
 
 class FakeApp(object):

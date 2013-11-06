@@ -14,4 +14,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "1.0.0"
+
+from swift.common.utils import readconf, config_true_value
+
+config_file = {}
+try:
+    config_file = readconf("/etc/swift/proxy-server.conf",
+                           section_name="filter:cache")
+except SystemExit:
+    pass
+MEMCACHE_SERVERS = config_file.get('memcache_servers', None)
+
+config_file = {}
+try:
+    config_file = readconf("/etc/swift/proxy-server.conf",
+                           section_name="filter:kerbauth")
+except SystemExit:
+    pass
+TOKEN_LIFE = int(config_file.get('token_life', 86400))
+RESELLER_PREFIX = config_file.get('reseller_prefix', "AUTH_")
+DEBUG_HEADERS = config_true_value(config_file.get('debug_headers', 'yes'))

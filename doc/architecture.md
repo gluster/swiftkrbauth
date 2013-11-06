@@ -38,10 +38,9 @@ either grants or denies the resource access.
 
 ## kerbauth.py
 
-The script /usr/lib/python2.6/site-packages/swiftkerbauth/kerbauth.py began as
-a copy of the tempauth.py script from
-/usr/lib/python2.6/site-packages/swift/common/middleware. It contains
-the following modifications, among others:
+The script kerbauth.py began as a copy of the tempauth.py script from
+from tempauth middleware. It contains the following modifications, among
+others:
 
 In the __init__ method, we read the ext_authentication_url parameter
 from /etc/swift/proxy-server.conf. This is the URL that clients are

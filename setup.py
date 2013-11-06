@@ -16,8 +16,9 @@
 # limitations under the License.
 
 from setuptools import setup
-from swiftkerbauth import __version__
 import os
+
+__version__ = '1.0.0'
 
 with open('README.md') as file:
     long_description = file.read()
@@ -44,10 +45,10 @@ setup(
     author='Red Hat, Inc.',
     author_email='gluster-users@gluster.org',
     long_description=long_description,
-    url='https://forge.gluster.org/swiftkerbauth',
+    url='https://github.com/gluster/swiftkrbauth/',
     packages=['swiftkerbauth'],
     keywords='openstack swift kerberos',
-    install_requires=['swift>=1.9.1'],
+    install_requires=['swift>=1.10.0'],
     test_suite='nose.collector',
     classifiers=[
         'Development Status :: 3 - Alpha',
