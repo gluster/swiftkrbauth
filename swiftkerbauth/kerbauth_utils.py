@@ -16,7 +16,7 @@
 import re
 import random
 import grp
-import subprocess
+from subprocess import Popen, PIPE
 from time import time
 from swiftkerbauth import TOKEN_LIFE, RESELLER_PREFIX
 
@@ -87,7 +87,7 @@ def get_groups(username):
     # because group names from Active Directory may contain spaces, and
     # we wouldn't be able to split the list of group names into its
     # elements.
-    p = subprocess.Popen(['id', '-G', username], stdout=subprocess.PIPE)
+    p = Popen(['id', '-G', username], stdout=PIPE)
     if p.wait() != 0:
         raise RuntimeError("Failure running id -G for %s" % username)
     (p_stdout, p_stderr) = p.communicate()
@@ -104,3 +104,12 @@ def get_groups(username):
     groups = [username] + groups
     groups = ','.join(groups)
     return groups
+
+
+def run_kinit(username, password):
+    """Runs kinit command as a child process and returns the status code."""
+    kinit = Popen(['kinit', username],
+                  stdin=PIPE, stdout=PIPE, stderr=PIPE)
+    kinit.stdin.write('%s\n' % password)
+    kinit.wait()
+    return kinit.returncode

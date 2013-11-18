@@ -12,17 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from time import time
+import errno
+from time import time, ctime
 from traceback import format_exc
 from eventlet import Timeout
 
-from swift.common.swob import Request
+from swift.common.swob import Request, Response
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, HTTPNotFound, \
-    HTTPSeeOther
+    HTTPSeeOther, HTTPUnauthorized, HTTPServerError
 
 from swift.common.middleware.acl import clean_acl, parse_acl, referrer_allowed
 from swift.common.utils import cache_from_env, get_logger,  \
     split_path, config_true_value
+
+from swiftkerbauth.kerbauth_utils import get_auth_data, generate_token, \
+    set_auth_data, run_kinit
+from swiftkerbauth.kerbauth_utils import get_groups as \
+    get_groups_from_username
 
 
 class KerbAuth(object):
@@ -71,6 +77,10 @@ class KerbAuth(object):
         if self.auth_prefix[-1] != '/':
             self.auth_prefix += '/'
         self.token_life = int(conf.get('token_life', 86400))
+        self.auth_method = conf.get('auth_method', 'active')
+        self.debug_headers = config_true_value(
+            conf.get('debug_headers', 'yes'))
+        self.realm_name = conf.get('realm_name', None)
         self.allow_overrides = config_true_value(
             conf.get('allow_overrides', 't'))
         self.storage_url_scheme = conf.get('storage_url_scheme', 'default')
@@ -109,8 +119,13 @@ class KerbAuth(object):
                     env['reseller_request'] = True
             else:
                 # Invalid token (may be expired)
-                return HTTPSeeOther(
-                    location=self.ext_authentication_url)(env, start_response)
+                if self.auth_method == "active":
+                    return HTTPSeeOther(
+                        location=self.ext_authentication_url)(env,
+                                                              start_response)
+                elif self.auth_method == "passive":
+                    self.logger.increment('unauthorized')
+                    return HTTPUnauthorized()(env, start_response)
         else:
             # With a non-empty reseller_prefix, I would like to be called
             # back for anonymous access to accounts I know I'm the
@@ -234,7 +249,11 @@ class KerbAuth(object):
             self.logger.increment('forbidden')
             return HTTPForbidden(request=req)
         else:
-            return HTTPSeeOther(location=self.ext_authentication_url)
+            if self.auth_method == "active":
+                return HTTPSeeOther(location=self.ext_authentication_url)
+            elif self.auth_method == "passive":
+                self.logger.increment('unauthorized')
+                return HTTPUnauthorized(request=req)
 
     def handle(self, env, start_response):
         """
@@ -315,7 +334,65 @@ class KerbAuth(object):
                 or pathsegs[0] in ('auth', 'v1.0')):
                     return HTTPBadRequest(request=req)
 
-        return HTTPSeeOther(location=self.ext_authentication_url)
+        # Client is inside the domain
+        if self.auth_method == "active":
+            return HTTPSeeOther(location=self.ext_authentication_url)
+
+        # Client is outside the domain
+        elif self.auth_method == "passive":
+            user = None
+            key = None
+            # Extract username and password from request
+            user = req.headers.get('x-storage-user')
+            if not user:
+                user = req.headers.get('x-auth-user')
+            key = req.headers.get('x-storage-pass')
+            if not key:
+                key = req.headers.get('x-auth-key')
+
+            if (not user) and (not key):
+                # If both are not given, client may be part of the domain
+                return HTTPSeeOther(location=self.ext_authentication_url)
+            elif None in (key, user):
+                # If either user OR key is given, but not both
+                return HTTPUnauthorized(request=req)
+
+            # Run kinit on the user
+            if self.realm_name and "@" not in user:
+                user = user + "@" + self.realm_name
+            try:
+                ret = run_kinit(user, key)
+            except OSError as e:
+                if e.errno == errno.ENOENT:
+                    return HTTPServerError("kinit command not found\n")
+            if ret != 0:
+                self.logger.warning("Failed: kinit %s", user)
+                return HTTPUnauthorized(request=req)
+            self.logger.debug("kinit succeeded")
+
+            if "@" in user:
+                user = user.split("@")[0]
+            mc = cache_from_env(req.environ)
+            if not mc:
+                raise Exception('Memcache required')
+            token, expires, groups = get_auth_data(mc, user)
+            if not token:
+                token = generate_token()
+                expires = time() + self.token_life
+                groups = get_groups_from_username(user)
+                set_auth_data(mc, user, token, expires, groups)
+
+            headers = {'X-Auth-Token': token,
+                       'X-Storage-Token': token}
+
+            if self.debug_headers:
+                headers.update({'X-Debug-Remote-User': user,
+                                'X-Debug-Groups:': groups,
+                                'X-Debug-Token-Life': self.token_life,
+                                'X-Debug-Token-Expires': ctime(expires)})
+
+            resp = Response(request=req, headers=headers)
+            return resp
 
 
 def filter_factory(global_conf, **local_conf):

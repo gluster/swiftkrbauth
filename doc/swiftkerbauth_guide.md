@@ -4,6 +4,7 @@
 * [Creating HTTP Service Principal on IPA server] (#http-principal)
 * [Installing and configuring swiftkerbauth on IPA client] (#install-swiftkerbauth)
 * [Using swiftkerbauth] (#use-swiftkerbauth)
+* [Configurable Parameters] (#config-swiftkerbauth)
 
 <a name="httpd-kerb-install" />
 ## Installing Kerberos module for Apache on IPA client
@@ -433,3 +434,55 @@ The --negotiate option is for curl to perform Kerberos authentication and
 --location-trusted is for curl to follow the redirect.
 
 [auth_kerb_module Configuration]: http://modauthkerb.sourceforge.net/configure.html
+
+
+#### Get an authentication token when auth_mode=passive:
+> curl -v -H 'X-Auth-User: auth_admin' -H 'X-Auth-Key: Redhat*123' http://127.0.0.1:8080/auth/v1.0
+
+
+<a name="config-swiftkerbauth" />
+##Configurable Parameters
+
+The kerbauth filter section in **/etc/swift/proxy-server.conf** looks something
+like this:
+
+    [filter:kerbauth]
+    use = egg:swiftkerbauth#kerbauth
+    ext_authentication_url = http://client.rhelbox.com/cgi-bin/swift-auth
+    auth_method = active
+    token_life = 86400
+    debug_headers = yes
+    realm_name = RHELBOX.COM
+
+Of all the options listed above, specifying **ext\_authentication\_url** is
+mandatory. The rest of the options are optional and have default values.
+
+#### ext\_authentication\_url
+A URL specifying location of the swift-auth CGI script. Avoid using IP address.  
+Default value: None
+
+#### token_life
+After how many seconds the cached information about an authentication token is
+discarded.  
+Default value: 86400
+
+#### debug_headers
+When turned on, the response headers sent to the user will contain additional
+debug information apart from the auth token.  
+Default value: yes
+
+#### auth_method
+Set this to **"active"** when you want to allow access **only to clients
+residing inside the domain**. In this mode, authentication is performed by
+mod\_auth\_kerb using the Kerberos ticket bundled with the client request.
+No username and password have to be specified to get a token.  
+Set this to **"passive"** when you want to allow access to clients residing
+outside the domain. In this mode, authentication is performed by gleaning
+username and password from request headers (X-Auth-User and X-Auth-Key) and
+running kinit command against it.   
+Default value: active
+
+#### realm_name
+This is applicable only when the auth_method=passive. This option specifies
+realm name if RHS server belongs to more than one realm and realm name is not
+part of the username specified in X-Auth-User header.
