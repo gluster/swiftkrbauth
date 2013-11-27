@@ -48,7 +48,8 @@ Copy keytab file to client:
 
 Add a HTTP Kerberos service principal:
 > c:\>ktpass.exe -princ HTTP/fcclient.winad.com@WINAD.COM -mapuser
-> auth_admin@WINAD.COM -pass Redhat*123 -out c:\HTTP.keytab
+> auth_admin@WINAD.COM -pass Redhat*123 -out c:\HTTP.keytab -crypto DES-CBC-CRC
+> -kvno 0
 
 Use winscp to copy HTTP.ketab file to /etc/httpd/conf/http.keytab
 
