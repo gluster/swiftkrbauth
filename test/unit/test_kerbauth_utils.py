@@ -64,13 +64,13 @@ class TestKerbUtils(unittest.TestCase):
         matches = re.match('AUTH_tk[a-f0-9]{32}', token)
         self.assertIsNotNone(matches)
 
-    def test_get_groups(self):
-        groups = ku.get_groups("root")
+    def test_get_groups_from_username(self):
+        groups = ku.get_groups_from_username("root")
         self.assertIn("root", groups)
 
-    def test_get_groups_err(self):
+    def test_get_groups_from_username_err(self):
         try:
-            ku.get_groups("Zroot")
+            ku.get_groups_from_username("Zroot")
         except RuntimeError as err:
             self.assertTrue(err.args[0].startswith("Failure running id -G"))
         else:

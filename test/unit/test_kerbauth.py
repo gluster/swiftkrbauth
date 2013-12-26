@@ -80,7 +80,8 @@ class TestAuth(unittest.TestCase):
     patch_filter_factory()
 
     def setUp(self):
-        self.test_auth = auth.filter_factory({})(FakeApp())
+        self.test_auth = \
+            auth.filter_factory({'auth_method': 'active'})(FakeApp())
         self.test_auth_passive = \
             auth.filter_factory({'auth_method': 'passive'})(FakeApp())
 
@@ -273,13 +274,46 @@ class TestAuth(unittest.TestCase):
         self.assertEquals(resp.status_int, REDIRECT_STATUS)
         #User given but no key
         req = self._make_request('/auth/v1.0',
-                                 headers={'X-Auth-User': 'blah'})
+                                 headers={'X-Auth-User': 'test:user'})
+        resp = self.test_auth_passive.handle_get_token(req)
+        self.assertEquals(resp.status_int, 401)
+
+    def test_passive_handle_get_token_account_in_req_path(self):
+        req = self._make_request('/v1/test/auth',
+                                 headers={'X-Auth-User': 'test:user',
+                                          'X-Auth-Key': 'password'})
+        _mock_run_kinit = Mock(return_value=0)
+        _mock_get_groups = Mock(return_value="user,auth_test")
+        with patch('swiftkerbauth.kerbauth.run_kinit', _mock_run_kinit):
+            with patch('swiftkerbauth.kerbauth.get_groups_from_username',
+                       _mock_get_groups):
+                resp = self.test_auth_passive.handle_get_token(req)
+        _mock_run_kinit.assert_called_once_with('user', 'password')
+        self.assertEquals(_mock_get_groups.call_count, 2)
+        self.assertEquals(resp.status_int, 200)
+        self.assertIsNotNone(resp.headers['X-Auth-Token'])
+        self.assertIsNotNone(resp.headers['X-Storage-Token'])
+        self.assertIsNotNone(resp.headers['X-Storage-Url'])
+
+    def test_passive_handle_get_token_user_invalid_or_no__account(self):
+        #X-Auth-User not in acc:user format
+        req = self._make_request('/auth/v1.0',
+                                 headers={'X-Auth-User': 'user'})
+        resp = self.test_auth_passive.handle_get_token(req)
+        self.assertEquals(resp.status_int, 401)
+        req = self._make_request('/v1/test/auth',
+                                 headers={'X-Auth-User': 'user'})
+        resp = self.test_auth_passive.handle_get_token(req)
+        self.assertEquals(resp.status_int, 401)
+        # Account name mismatch
+        req = self._make_request('/v1/test/auth',
+                                 headers={'X-Auth-User': 'wrongacc:user'})
         resp = self.test_auth_passive.handle_get_token(req)
         self.assertEquals(resp.status_int, 401)
 
     def test_passive_handle_get_token_no_kinit(self):
         req = self._make_request('/auth/v1.0',
-                                 headers={'X-Auth-User': 'user',
+                                 headers={'X-Auth-User': 'test:user',
                                           'X-Auth-Key': 'password'})
         _mock_run_kinit = Mock(side_effect=OSError(errno.ENOENT,
                                                    os.strerror(errno.ENOENT)))
@@ -291,7 +325,7 @@ class TestAuth(unittest.TestCase):
 
     def test_passive_handle_get_token_kinit_fail(self):
         req = self._make_request('/auth/v1.0',
-                                 headers={'X-Auth-User': 'user',
+                                 headers={'X-Auth-User': 'test:user',
                                           'X-Auth-Key': 'password'})
         _mock_run_kinit = Mock(return_value=1)
         with patch('swiftkerbauth.kerbauth.run_kinit', _mock_run_kinit):
@@ -301,38 +335,57 @@ class TestAuth(unittest.TestCase):
 
     def test_passive_handle_get_token_kinit_success_token_not_present(self):
         req = self._make_request('/auth/v1.0',
-                                 headers={'X-Auth-User': 'user',
+                                 headers={'X-Auth-User': 'test:user',
                                           'X-Auth-Key': 'password'})
         _mock_run_kinit = Mock(return_value=0)
-        _mock_get_groups = Mock(return_value="user,admins")
+        _mock_get_groups = Mock(return_value="user,auth_test")
         with patch('swiftkerbauth.kerbauth.run_kinit', _mock_run_kinit):
             with patch('swiftkerbauth.kerbauth.get_groups_from_username',
                        _mock_get_groups):
                 resp = self.test_auth_passive.handle_get_token(req)
-                _mock_run_kinit.assert_called_once_with('user', 'password')
         _mock_run_kinit.assert_called_once_with('user', 'password')
-        _mock_get_groups.assert_called_once_with('user')
+        self.assertEquals(_mock_get_groups.call_count, 2)
         self.assertEquals(resp.status_int, 200)
         self.assertIsNotNone(resp.headers['X-Auth-Token'])
         self.assertIsNotNone(resp.headers['X-Storage-Token'])
+        self.assertIsNotNone(resp.headers['X-Storage-Url'])
 
     def test_passive_handle_get_token_kinit_realm_and_memcache(self):
         req = self._make_request('/auth/v1.0',
-                                 headers={'X-Auth-User': 'user',
+                                 headers={'X-Auth-User': 'test:user',
                                           'X-Auth-Key': 'password'})
         req.environ['swift.cache'] = None
         _auth_passive = \
             auth.filter_factory({'auth_method': 'passive',
                                 'realm_name': 'EXAMPLE.COM'})(FakeApp())
         _mock_run_kinit = Mock(return_value=0)
+        _mock_get_groups = Mock(return_value="user,auth_test")
         with patch('swiftkerbauth.kerbauth.run_kinit', _mock_run_kinit):
-            try:
-                _auth_passive.handle_get_token(req)
-            except Exception as e:
-                self.assertTrue(e.args[0].startswith("Memcache required"))
-            else:
-                self.fail("Expected Exception - Memcache required")
+            with patch('swiftkerbauth.kerbauth.get_groups_from_username',
+                       _mock_get_groups):
+                    try:
+                        _auth_passive.handle_get_token(req)
+                    except Exception as e:
+                        self.assertTrue(e.args[0].startswith("Memcache "
+                                                             "required"))
+                    else:
+                        self.fail("Expected Exception - Memcache required")
         _mock_run_kinit.assert_called_once_with('user@EXAMPLE.COM', 'password')
+        _mock_get_groups.assert_called_once_with('user')
+
+    def test_passive_handle_get_token_user_in_any__account(self):
+        req = self._make_request('/auth/v1.0',
+                                 headers={'X-Auth-User': 'test:user',
+                                          'X-Auth-Key': 'password'})
+        _mock_run_kinit = Mock(return_value=0)
+        _mock_get_groups = Mock(return_value="user,auth_blah")
+        with patch('swiftkerbauth.kerbauth.run_kinit', _mock_run_kinit):
+            with patch('swiftkerbauth.kerbauth.get_groups_from_username',
+                       _mock_get_groups):
+                resp = self.test_auth_passive.handle_get_token(req)
+                self.assertEquals(resp.status_int, 401)
+        _mock_run_kinit.assert_called_once_with('user', 'password')
+        _mock_get_groups.assert_called_once_with('user')
 
     def test_handle(self):
         req = self._make_request('/auth/v1.0')

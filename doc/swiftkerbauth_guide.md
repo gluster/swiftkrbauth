@@ -103,6 +103,7 @@ Edit */etc/swift/proxy-server.conf* and add a new filter section as follows:
     [filter:kerbauth]
     use = egg:swiftkerbauth#kerbauth
     ext_authentication_url = http://client.rhelbox.com/cgi-bin/swift-auth
+    auth_mode=passive
 
 Add kerbauth to pipeline
 
@@ -438,8 +439,9 @@ The --negotiate option is for curl to perform Kerberos authentication and
 
 
 #### Get an authentication token when auth_mode=passive:
-> curl -v -H 'X-Auth-User: auth_admin' -H 'X-Auth-Key: Redhat*123' http://127.0.0.1:8080/auth/v1.0
+> curl -v -H 'X-Auth-User: test:auth_admin' -H 'X-Auth-Key: Redhat*123' http://127.0.0.1:8080/auth/v1.0
 
+**NOTE**: X-Storage-Url response header can be returned only in passive mode.
 
 <a name="config-swiftkerbauth" />
 ##Configurable Parameters
@@ -481,7 +483,7 @@ Set this to **"passive"** when you want to allow access to clients residing
 outside the domain. In this mode, authentication is performed by gleaning
 username and password from request headers (X-Auth-User and X-Auth-Key) and
 running kinit command against it.   
-Default value: active
+Default value: passive
 
 #### realm_name
 This is applicable only when the auth_method=passive. This option specifies

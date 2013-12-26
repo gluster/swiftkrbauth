@@ -81,7 +81,7 @@ def generate_token():
     return token
 
 
-def get_groups(username):
+def get_groups_from_username(username):
     """Return a set of groups to which the user belongs to."""
     # Retrieve the numerical group IDs. We cannot list the group names
     # because group names from Active Directory may contain spaces, and

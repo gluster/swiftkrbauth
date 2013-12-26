@@ -16,6 +16,7 @@ import errno
 from time import time, ctime
 from traceback import format_exc
 from eventlet import Timeout
+from urllib import unquote
 
 from swift.common.swob import Request, Response
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, HTTPNotFound, \
@@ -26,9 +27,7 @@ from swift.common.utils import cache_from_env, get_logger,  \
     split_path, config_true_value
 
 from swiftkerbauth.kerbauth_utils import get_auth_data, generate_token, \
-    set_auth_data, run_kinit
-from swiftkerbauth.kerbauth_utils import get_groups as \
-    get_groups_from_username
+    set_auth_data, run_kinit, get_groups_from_username
 
 
 class KerbAuth(object):
@@ -77,7 +76,7 @@ class KerbAuth(object):
         if self.auth_prefix[-1] != '/':
             self.auth_prefix += '/'
         self.token_life = int(conf.get('token_life', 86400))
-        self.auth_method = conf.get('auth_method', 'active')
+        self.auth_method = conf.get('auth_method', 'passive')
         self.debug_headers = config_true_value(
             conf.get('debug_headers', 'yes'))
         self.realm_name = conf.get('realm_name', None)
@@ -309,16 +308,37 @@ class KerbAuth(object):
         """
         Handles the various `request for token and service end point(s)` calls.
         There are various formats to support the various auth servers in the
-        past. Examples::
+        past.
+
+        "Active Mode" usage:
+            All formats require GSS (Kerberos) authentication.
 
             GET <auth-prefix>/v1/<act>/auth
             GET <auth-prefix>/auth
             GET <auth-prefix>/v1.0
 
-        All formats require GSS (Kerberos) authentication.
+            On successful authentication, the response will have X-Auth-Token
+            and X-Storage-Token set to the token to use with Swift.
 
-        On successful authentication, the response will have X-Auth-Token
-        set to the token to use with Swift.
+        "Passive Mode" usage::
+
+            GET <auth-prefix>/v1/<act>/auth
+                X-Auth-User: <act>:<usr>  or  X-Storage-User: <usr>
+                X-Auth-Key: <key>         or  X-Storage-Pass: <key>
+            GET <auth-prefix>/auth
+                X-Auth-User: <act>:<usr>  or  X-Storage-User: <act>:<usr>
+                X-Auth-Key: <key>         or  X-Storage-Pass: <key>
+            GET <auth-prefix>/v1.0
+                X-Auth-User: <act>:<usr>  or  X-Storage-User: <act>:<usr>
+                X-Auth-Key: <key>         or  X-Storage-Pass: <key>
+
+            Values should be url encoded, "act%3Ausr" instead of "act:usr" for
+            example; however, for backwards compatibility the colon may be
+            included unencoded.
+
+            On successful authentication, the response will have X-Auth-Token
+            and X-Storage-Token set to the token to use with Swift and
+            X-Storage-URL set to the URL to the default Swift cluster to use.
 
         :param req: The swob.Request to process.
         :returns: swob.Response, 2xx on success with data set as explained
@@ -340,21 +360,41 @@ class KerbAuth(object):
 
         # Client is outside the domain
         elif self.auth_method == "passive":
-            user = None
-            key = None
-            # Extract username and password from request
-            user = req.headers.get('x-storage-user')
-            if not user:
-                user = req.headers.get('x-auth-user')
-            key = req.headers.get('x-storage-pass')
-            if not key:
-                key = req.headers.get('x-auth-key')
+            account, user, key = None, None, None
+            # Extract user, account and key from request
+            if pathsegs[0] == 'v1' and pathsegs[2] == 'auth':
+                account = pathsegs[1]
+                user = req.headers.get('x-storage-user')
+                if not user:
+                    user = unquote(req.headers.get('x-auth-user', ''))
+                    if user:
+                        if ':' not in user:
+                            return HTTPUnauthorized(request=req)
+                        else:
+                            account2, user = user.split(':', 1)
+                            if account != account2:
+                                return HTTPUnauthorized(request=req)
+                key = req.headers.get('x-storage-pass')
+                if not key:
+                    key = unquote(req.headers.get('x-auth-key', ''))
+            elif pathsegs[0] in ('auth', 'v1.0'):
+                user = unquote(req.headers.get('x-auth-user', ''))
+                if not user:
+                    user = req.headers.get('x-storage-user')
+                if user:
+                    if ':' not in user:
+                        return HTTPUnauthorized(request=req)
+                    else:
+                        account, user = user.split(':', 1)
+                key = unquote(req.headers.get('x-auth-key', ''))
+                if not key:
+                    key = req.headers.get('x-storage-pass')
 
-            if (not user) and (not key):
-                # If both are not given, client may be part of the domain
+            if not (account or user or key):
+                # If all are not given, client may be part of the domain
                 return HTTPSeeOther(location=self.ext_authentication_url)
-            elif None in (key, user):
-                # If either user OR key is given, but not both
+            elif None in (key, user, account):
+                # If only one or two of them is given, but not all
                 return HTTPUnauthorized(request=req)
 
             # Run kinit on the user
@@ -372,6 +412,18 @@ class KerbAuth(object):
 
             if "@" in user:
                 user = user.split("@")[0]
+
+            # Check if user really belongs to the account
+            groups_list = get_groups_from_username(user).strip().split(",")
+            user_group = ("%s%s" % (self.reseller_prefix, account)).lower()
+            reseller_admin_group = \
+                ("%sreseller_admin" % self.reseller_prefix).lower()
+            if user_group not in groups_list:
+                # Check if user is reseller_admin. If not, return Unauthorized.
+                # On AD/IdM server, auth_reseller_admin is a separate group
+                if reseller_admin_group not in groups_list:
+                    return HTTPUnauthorized(request=req)
+
             mc = cache_from_env(req.environ)
             if not mc:
                 raise Exception('Memcache required')
@@ -392,6 +444,8 @@ class KerbAuth(object):
                                 'X-Debug-Token-Expires': ctime(expires)})
 
             resp = Response(request=req, headers=headers)
+            resp.headers['X-Storage-Url'] = \
+                '%s/v1/%s%s' % (resp.host_url, self.reseller_prefix, account)
             return resp
 
 
