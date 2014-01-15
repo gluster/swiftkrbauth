@@ -16,6 +16,7 @@
 import re
 import random
 import grp
+import signal
 from subprocess import Popen, PIPE
 from time import time
 from swiftkerbauth import TOKEN_LIFE, RESELLER_PREFIX
@@ -111,5 +112,25 @@ def run_kinit(username, password):
     kinit = Popen(['kinit', username],
                   stdin=PIPE, stdout=PIPE, stderr=PIPE)
     kinit.stdin.write('%s\n' % password)
-    kinit.wait()
-    return kinit.returncode
+
+    # The following code handles a corner case where the Kerberos password
+    # has expired and a prompt is displayed to enter new password. Ideally,
+    # we would want to read from stdout but these are blocked reads. This is
+    # a hack to kill the process if it's taking too long!
+
+    class Alarm(Exception):
+        pass
+
+    def signal_handler(signum, frame):
+        raise Alarm
+    # Set the signal handler and a 1-second alarm
+    signal.signal(signal.SIGALRM, signal_handler)
+    signal.alarm(1)
+    try:
+        kinit.wait()  # Wait for the child to exit
+        signal.alarm(0)  # Reset the alarm
+        return kinit.returncode  # Exit status of child on graceful exit
+    except Alarm:
+        # Taking too long, kill and return error
+        kinit.kill()
+        return -1

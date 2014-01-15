@@ -407,6 +407,10 @@ class KerbAuth(object):
                     return HTTPServerError("kinit command not found\n")
             if ret != 0:
                 self.logger.warning("Failed: kinit %s", user)
+                if ret == -1:
+                    self.logger.warning("Failed: kinit: Password has probably "
+                                        "expired.")
+                    return HTTPServerError("Kinit is taking too long.\n")
                 return HTTPUnauthorized(request=req)
             self.logger.debug("kinit succeeded")
 
