@@ -62,11 +62,11 @@ class TestKerbUtils(unittest.TestCase):
     def test_generate_token(self):
         token = ku.generate_token()
         matches = re.match('AUTH_tk[a-f0-9]{32}', token)
-        self.assertIsNotNone(matches)
+        self.assertTrue(matches is not None)
 
     def test_get_groups_from_username(self):
         groups = ku.get_groups_from_username("root")
-        self.assertIn("root", groups)
+        self.assertTrue("root" in groups)
 
     def test_get_groups_from_username_err(self):
         try:

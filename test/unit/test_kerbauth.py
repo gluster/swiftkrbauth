@@ -291,9 +291,9 @@ class TestAuth(unittest.TestCase):
         _mock_run_kinit.assert_called_once_with('user', 'password')
         self.assertEquals(_mock_get_groups.call_count, 2)
         self.assertEquals(resp.status_int, 200)
-        self.assertIsNotNone(resp.headers['X-Auth-Token'])
-        self.assertIsNotNone(resp.headers['X-Storage-Token'])
-        self.assertIsNotNone(resp.headers['X-Storage-Url'])
+        self.assertTrue(resp.headers['X-Auth-Token'] is not None)
+        self.assertTrue(resp.headers['X-Storage-Token'] is not None)
+        self.assertTrue(resp.headers['X-Storage-Url'] is not None)
 
     def test_passive_handle_get_token_user_invalid_or_no__account(self):
         #X-Auth-User not in acc:user format
@@ -320,7 +320,7 @@ class TestAuth(unittest.TestCase):
         with patch('swiftkerbauth.kerbauth.run_kinit', _mock_run_kinit):
             resp = self.test_auth_passive.handle_get_token(req)
         self.assertEquals(resp.status_int, 500)
-        self.assertIn("kinit command not found", resp.body)
+        self.assertTrue("kinit command not found" in resp.body)
         _mock_run_kinit.assert_called_once_with('user', 'password')
 
     def test_passive_handle_get_token_kinit_fail(self):
@@ -346,9 +346,9 @@ class TestAuth(unittest.TestCase):
         _mock_run_kinit.assert_called_once_with('user', 'password')
         self.assertEquals(_mock_get_groups.call_count, 2)
         self.assertEquals(resp.status_int, 200)
-        self.assertIsNotNone(resp.headers['X-Auth-Token'])
-        self.assertIsNotNone(resp.headers['X-Storage-Token'])
-        self.assertIsNotNone(resp.headers['X-Storage-Url'])
+        self.assertTrue(resp.headers['X-Auth-Token'] is not None)
+        self.assertTrue(resp.headers['X-Storage-Token'] is not None)
+        self.assertTrue(resp.headers['X-Storage-Url'] is not None)
 
     def test_passive_handle_get_token_kinit_realm_and_memcache(self):
         req = self._make_request('/auth/v1.0',
